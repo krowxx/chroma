@@ -1,6 +1,6 @@
 # Chroma
 
-Chroma is a native macOS menu-bar app for switching between Mission Control Spaces with **Option–Tab**. Each Space gets a color and a label. Full-screen Spaces show their app icons, and Split View tiles can show both.
+Chroma is a native macOS menu-bar app for switching between Mission Control Spaces. Each Space gets a color and a label. Full-screen Spaces show their app icons, and Split View tiles can show both.
 
 ## Build and run
 
@@ -17,17 +17,25 @@ Chroma appears in the menu bar as a stack of squares. In the switcher, click **A
 
 ## Controls
 
+On ISO keyboards, press **Command** and the key just left of **1**. On a German keyboard, that's **⌘ ^**. Chroma uses **Control–Command–Tab** on other keyboard types to preserve the system window shortcut.
+
 | Input | Action |
 | --- | --- |
-| **⌥ Tab** | Hold Option and tap Tab to cycle forward. |
-| **⌥ ⇧ Tab** | Cycle backward. |
-| **Release Option** | Switch to the selected Space. |
+| **Opening shortcut** | Open the switcher with the current Space selected. |
+| **Tab** | Cycle forward. |
+| **⇧ Tab** | Cycle backward. |
 | **Arrow keys** | Move the selection while the switcher is open. |
 | **Return** or **click a tile** | Switch to that Space. |
 | **C** or **Edit tiles** | Select a tile to rename or recolor it. Clear the name field to restore its default label. |
 | **Esc** | Close the switcher. |
 
 The white dot marks the current Space on each display. The outline marks the selected tile. Names and colors are saved locally.
+
+### Trackpad
+
+In **System Settings → Trackpad → More Gestures**, set **Mission Control** to **Swipe Up with Four Fingers**. Then enable **Three-Finger Swipe Up** in Chroma’s menu. Swipe up with three fingers and lift to open Chroma on the current Space. Click a tile or use the usual selection keys to switch.
+
+The optional gesture reads the default trackpad through macOS’s private MultitouchSupport framework. Chroma leaves changes to the macOS gesture assignments to System Settings.
 
 Chroma lists Spaces through macOS's private SkyLight framework and switches via Mission Control Accessibility. Switching can briefly show Mission Control. If macOS creates a new Space identity when an app reenters full screen, Chroma assigns that Space a default name and color.
 

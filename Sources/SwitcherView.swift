@@ -8,7 +8,6 @@ final class SwitcherModel: ObservableObject {
     @Published var names: [UInt64: String] = [:]
     @Published var selection: UInt64?
     @Published var editing = false
-    @Published var held = false
     @Published var needsAccess = false
     @Published var message: String?
     @Published var width: CGFloat = 600
@@ -287,13 +286,10 @@ struct SwitcherView: View {
             } else if model.editing {
                 Text("Select a tile to rename it or change its color.")
                     .foregroundStyle(muted)
-            } else if model.held {
-                hint("⇥", "Cycle")
-                hint("⌥", "Release to switch")
             } else if !model.desktops.isEmpty {
+                hint("⇥ / ⇧⇥", "Cycle")
                 hint("← →", "Select")
                 hint("↩", "Switch")
-                hint("C", "Edit")
             }
             Spacer(minLength: 4)
             if model.needsAccess {

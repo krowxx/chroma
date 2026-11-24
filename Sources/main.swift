@@ -9,6 +9,15 @@ final class SwitcherPanel: NSPanel {
 }
 
 final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private static let swipePreference = "ThreeFingerSwipeUp"
+    private let pickerShortcut: (keyCode: UInt32, modifiers: UInt32, label: String) = {
+        if KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO {
+            // macOS maps the key left of 1 on ISO keyboards to kVK_ISO_Section.
+            return (UInt32(kVK_ISO_Section), UInt32(cmdKey), "⌘ + key left of 1")
+        }
+        // The equivalent ANSI key is used by the system window switcher.
+        return (UInt32(kVK_Tab), UInt32(controlKey | cmdKey), "⌃⌘ Tab")
+    }()
     private let catalog = SpaceCatalog()
     private let preferences = TilePreferences()
     private let missionControl = MissionControl()
@@ -18,12 +27,12 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var accessItem: NSMenuItem?
     private var shortcutItem: NSMenuItem?
+    private var swipeItem: NSMenuItem?
     private var keyMonitor: Any?
     private var outsideClickMonitor: Any?
-    private var releaseTimer: Timer?
     private var accessTimer: Timer?
     private var eventHandler: EventHandlerRef?
-    private var hotKeys: [EventHotKeyRef] = []
+    private var hotKey: EventHotKeyRef?
     private var switching = false
     private var anchor: CGPoint?
     private var didRequestAccess = false
@@ -32,7 +41,7 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         createPanel()
         createMenu()
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleLocal(event) == true ? nil : event
         }
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -42,7 +51,13 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let launchedBefore = UserDefaults.standard.bool(forKey: "LaunchedBefore")
         if !demo {
-            registerShortcuts()
+            registerShortcut()
+            let notifications = NSWorkspace.shared.notificationCenter
+            notifications.addObserver(self, selector: #selector(trackpadWillSleep(_:)),
+                                      name: NSWorkspace.willSleepNotification, object: nil)
+            notifications.addObserver(self, selector: #selector(trackpadDidWake(_:)),
+                                      name: NSWorkspace.didWakeNotification, object: nil)
+            if UserDefaults.standard.bool(forKey: Self.swipePreference) { _ = startTrackpadSwipe() }
             UserDefaults.standard.set(true, forKey: "LaunchedBefore")
         }
         if demo || !launchedBefore {
@@ -56,7 +71,9 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        for hotKey in hotKeys { UnregisterEventHotKey(hotKey) }
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        TrackpadSwipe.shared.stop()
+        if let hotKey { UnregisterEventHotKey(hotKey) }
         if let eventHandler { RemoveEventHandler(eventHandler) }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
@@ -112,10 +129,15 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.addItem(menuItem("Choose Desktop…", action: #selector(openPicker)))
         menu.addItem(menuItem("Edit Tiles…", action: #selector(openEditor)))
+        if !demo {
+            let swipe = menuItem("Three-Finger Swipe Up", action: #selector(toggleTrackpadSwipe))
+            menu.addItem(swipe)
+            swipeItem = swipe
+        }
         let access = menuItem("Accessibility Setup…", action: #selector(requestAccess))
         menu.addItem(access)
         accessItem = access
-        let shortcut = NSMenuItem(title: "⌥ Tab  ·  Switch desktops", action: nil, keyEquivalent: "")
+        let shortcut = NSMenuItem(title: "\(pickerShortcut.label)  ·  Open switcher", action: nil, keyEquivalent: "")
         menu.addItem(shortcut)
         shortcutItem = shortcut
         menu.addItem(.separator())
@@ -132,15 +154,38 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         accessItem?.isHidden = demo || AXIsProcessTrusted()
-        shortcutItem?.title = hotKeys.count == 2
-            ? "⌥ Tab  ·  Switch desktops" : "⌥ Tab shortcut unavailable"
+        swipeItem?.state = UserDefaults.standard.bool(forKey: Self.swipePreference) ? .on : .off
+        shortcutItem?.title = hotKey != nil
+            ? "\(pickerShortcut.label)  ·  Open switcher" : "\(pickerShortcut.label) shortcut unavailable"
     }
 
     @objc private func openPicker() { show() }
     @objc private func openEditor() { show(editing: true) }
     @objc private func quit() { NSApp.terminate(nil) }
 
-    private func show(editing: Bool = false, offset: Int? = nil, message: String? = nil) {
+    @objc private func toggleTrackpadSwipe() {
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: Self.swipePreference) {
+            TrackpadSwipe.shared.stop()
+            defaults.set(false, forKey: Self.swipePreference)
+        } else if startTrackpadSwipe() {
+            defaults.set(true, forKey: Self.swipePreference)
+        } else {
+            show(message: "Chroma couldn’t start the trackpad gesture.")
+        }
+    }
+
+    private func startTrackpadSwipe() -> Bool {
+        TrackpadSwipe.shared.start { [weak self] in self?.openFromShortcut() }
+    }
+
+    @objc private func trackpadWillSleep(_ notification: Notification) { TrackpadSwipe.shared.stop() }
+
+    @objc private func trackpadDidWake(_ notification: Notification) {
+        if UserDefaults.standard.bool(forKey: Self.swipePreference) { _ = startTrackpadSwipe() }
+    }
+
+    private func show(editing: Bool = false, message: String? = nil) {
         guard !switching, let panel else { return }
         let snapshot = demo ? PreviewData.snapshot() : catalog.snapshot(includeApps: true)
         let groups = snapshot.displays.filter { !$0.desktops.isEmpty }
@@ -160,11 +205,8 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.colors = demo ? PreviewData.colors(for: model.desktops) : preferences.colors(for: model.desktops)
         model.names = demo ? PreviewData.names : preferences.names(for: model.desktops)
         let active = preferred?.activeID ?? snapshot.focusedID
-        model.selection = model.desktops.first { $0.id == active }?.id
-        if let offset { model.advance(offset) }
-        if model.selection == nil { model.selection = model.desktops.first?.id }
+        model.selection = model.desktops.first { $0.id == active }?.id ?? model.desktops.first?.id
         model.editing = editing && !model.desktops.isEmpty
-        model.held = offset != nil
         model.message = message
         model.needsAccess = !demo && !AXIsProcessTrusted()
 
@@ -173,7 +215,6 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         syncColorPanel()
-        if model.held { startReleaseTimer() }
         checkAccessWhileVisible()
     }
 
@@ -193,14 +234,12 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func dismiss() {
         panel?.orderOut(nil)
         closeColorPanel()
-        stopHolding()
         accessTimer?.invalidate()
         accessTimer = nil
     }
 
     private func toggleEditor() {
         guard !model.desktops.isEmpty else { return }
-        stopHolding()
         model.editing.toggle()
         model.message = nil
         if !model.editing { closeColorPanel() }
@@ -261,7 +300,6 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
             model.needsAccess = false
             return
         }
-        stopHolding()
         // The first call lets macOS register the exact app bundle in its permission list.
         if !didRequestAccess {
             didRequestAccess = true
@@ -295,7 +333,6 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func commit() {
-        stopHolding()
         guard !switching, let desktop = model.selectedDesktop, !model.editing,
               let display = model.displays.first(where: { $0.desktops.contains { $0.id == desktop.id } }) else {
             return
@@ -320,10 +357,6 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handleLocal(_ event: NSEvent) -> Bool {
         guard let panel, panel.isVisible, event.window === panel else { return false }
-        if event.type == .flagsChanged {
-            releaseIfNeeded()
-            return false
-        }
         if model.editing, let field = panel.firstResponder as? NSTextView, field.isFieldEditor {
             if Int(event.keyCode) == kVK_Escape {
                 panel.makeFirstResponder(nil)
@@ -331,13 +364,16 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return false
         }
-        let modifiers = event.modifierFlags.intersection([.command, .control])
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option])
         guard modifiers.isEmpty else { return false }
         switch Int(event.keyCode) {
         case kVK_Escape: dismiss()
         case kVK_Return, kVK_ANSI_KeypadEnter:
             guard !model.editing else { return false }
             commit()
+        case kVK_Tab:
+            guard !model.editing else { return false }
+            model.advance(event.modifierFlags.contains(.shift) ? -1 : 1)
         case kVK_LeftArrow: model.advance(-1)
         case kVK_RightArrow: model.advance(1)
         case kVK_UpArrow: model.moveVertically(-1)
@@ -350,38 +386,15 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return true
     }
 
-    private func startReleaseTimer() {
-        releaseTimer?.invalidate()
-        let timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in
-            self?.releaseIfNeeded()
-        }
-        releaseTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    private func releaseIfNeeded() {
-        if model.held && !NSEvent.modifierFlags.contains(.option) {
-            if model.selectedDesktop == nil { dismiss() } else { commit() }
-        }
-    }
-
-    private func stopHolding() {
-        releaseTimer?.invalidate()
-        releaseTimer = nil
-        model.held = false
-    }
-
-    fileprivate func shortcut(offset: Int) {
-        guard !switching else { return }
-        if panel?.isVisible == true && (model.held || model.editing) {
-            model.advance(offset)
-            syncColorPanel()
+    private func openFromShortcut() {
+        if let panel, panel.isVisible {
+            panel.makeKeyAndOrderFront(nil)
             return
         }
-        show(offset: offset)
+        show()
     }
 
-    private func registerShortcuts() {
+    private func registerShortcut() {
         guard let target = GetApplicationEventTarget() else { return }
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let result = InstallEventHandler(target, { _, event, context in
@@ -390,22 +403,21 @@ final class Chroma: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let status = GetEventParameter(event, EventParamName(kEventParamDirectObject),
                                            EventParamType(typeEventHotKeyID), nil,
                                            MemoryLayout<EventHotKeyID>.size, nil, &key)
-            guard status == noErr, key.signature == 0x4368726D, key.id == 1 || key.id == 2 else {
+            guard status == noErr, key.signature == 0x4368726D, key.id == 1 else {
                 return OSStatus(eventNotHandledErr)
             }
             let app = Unmanaged<Chroma>.fromOpaque(context).takeUnretainedValue()
-            app.shortcut(offset: key.id == 1 ? 1 : -1)
+            app.openFromShortcut()
             return noErr
         }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
         guard result == noErr else { return }
 
-        for (id, modifiers) in [(1, optionKey), (2, optionKey | shiftKey)] {
-            var reference: EventHotKeyRef?
-            let key = EventHotKeyID(signature: 0x4368726D, id: UInt32(id))
-            if RegisterEventHotKey(UInt32(kVK_Tab), UInt32(modifiers), key, target, 0, &reference) == noErr,
-               let reference {
-                hotKeys.append(reference)
-            }
+        let key = EventHotKeyID(signature: 0x4368726D, id: 1)
+        let status = RegisterEventHotKey(pickerShortcut.keyCode, pickerShortcut.modifiers, key, target,
+                                         UInt32(kEventHotKeyExclusive), &hotKey)
+        if status != noErr, let eventHandler {
+            RemoveEventHandler(eventHandler)
+            self.eventHandler = nil
         }
     }
 
@@ -448,9 +460,8 @@ private func renderPreview(to path: String, editing: Bool) throws {
     model.displays = PreviewData.snapshot().displays
     model.colors = PreviewData.colors(for: model.desktops)
     model.names = PreviewData.names
-    model.selection = 3
+    model.selection = editing ? 3 : model.displays.first?.activeID
     model.width = 647
-    model.held = !editing
     model.editing = editing
     let view = SwitcherView(model: model, choose: { _ in }, toggleEditor: {}, recolor: { _ in }, rename: { _, _ in },
                             customColor: {}, showAccess: {}, dismiss: {})
